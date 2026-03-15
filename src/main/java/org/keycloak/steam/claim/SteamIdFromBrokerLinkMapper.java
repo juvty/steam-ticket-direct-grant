@@ -24,10 +24,9 @@ import org.keycloak.protocol.oidc.mappers.AbstractOIDCProtocolMapper;
 import org.keycloak.protocol.oidc.mappers.OIDCAccessTokenMapper;
 import org.keycloak.protocol.oidc.mappers.OIDCIDTokenMapper;
 import org.keycloak.provider.ProviderConfigProperty;
+import org.keycloak.models.UserModel;
 import org.keycloak.representations.AccessToken;
 import org.keycloak.representations.IDToken;
-import org.keycloak.storage.UserStorageUtil;
-import org.keycloak.storage.federated.UserBrokerLinkFederatedStorage;
 
 import java.util.Collections;
 import java.util.List;
@@ -106,10 +105,9 @@ public class SteamIdFromBrokerLinkMapper extends AbstractOIDCProtocolMapper
         if (userSession == null || userSession.getUser() == null) {
             return null;
         }
-        String userId = userSession.getUser().getId();
+        UserModel user = userSession.getUser();
         var realm = userSession.getRealm();
-        UserBrokerLinkFederatedStorage storage = UserStorageUtil.userFederatedStorage(session);
-        var federatedIdentity = storage.getFederatedIdentity(userId, STEAM_IDP_ALIAS, realm);
+        var federatedIdentity = session.users().getFederatedIdentity(realm, user, STEAM_IDP_ALIAS);
         if (federatedIdentity == null) {
             return null;
         }
