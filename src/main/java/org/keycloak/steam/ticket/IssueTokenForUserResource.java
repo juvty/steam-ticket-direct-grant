@@ -16,22 +16,19 @@
 
 package org.keycloak.steam.ticket;
 
-import jakarta.ws.rs.Consumes;
-import jakarta.ws.rs.POST;
-import jakarta.ws.rs.Path;
-import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
-
 import org.keycloak.models.ClientModel;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.UserModel;
 import org.keycloak.models.UserSessionModel;
+import org.keycloak.protocol.oidc.OIDCAdvancedConfigWrapper;
 import org.keycloak.protocol.oidc.OIDCLoginProtocol;
 import org.keycloak.protocol.oidc.TokenManager;
 import org.keycloak.representations.AccessTokenResponse;
 import org.keycloak.services.managers.AuthenticationSessionManager;
+import org.keycloak.services.Urls;
 import org.keycloak.sessions.AuthenticationSessionModel;
 import org.keycloak.sessions.RootAuthenticationSessionModel;
 
@@ -40,10 +37,8 @@ import org.jboss.logging.Logger;
 import java.util.Map;
 
 /**
- * REST endpoint: POST with body { "userId": "&lt;keycloak-user-id&gt;" }.
- * Caller must be authenticated with client_credentials. Creates a session for the user and returns tokens.
+ * Helper that issues tokens for a resolved Keycloak user on behalf of an already-authenticated client.
  */
-@Path("issue-token-for-user")
 public class IssueTokenForUserResource {
 
     private static final Logger logger = Logger.getLogger(IssueTokenForUserResource.class);
@@ -54,10 +49,7 @@ public class IssueTokenForUserResource {
         this.session = session;
     }
 
-    @POST
-    @Consumes(MediaType.APPLICATION_JSON)
-    @Produces(MediaType.APPLICATION_JSON)
-    public Response issueTokenForUser(Map<String, String> body) {
+    public Response issueTokenForUser(Map<String, String> body, ClientModel client) {
         if (body == null || !body.containsKey("userId")) {
             return Response.status(Response.Status.BAD_REQUEST)
                     .entity(Map.of("error", "invalid_request", "error_description", "Missing userId"))
@@ -73,7 +65,6 @@ public class IssueTokenForUserResource {
         }
 
         RealmModel realm = session.getContext().getRealm();
-        ClientModel client = session.getContext().getClient();
         if (client == null) {
             return Response.status(Response.Status.UNAUTHORIZED)
                     .entity(Map.of("error", "invalid_client", "error_description", "Caller must authenticate with client_credentials"))
@@ -91,9 +82,17 @@ public class IssueTokenForUserResource {
 
         try {
             String scopeParam = "openid profile email offline_access";
+            String issuer = Urls.realmIssuer(session.getContext().getUri().getBaseUri(), realm.getName());
+
+            // TokenManager and auth session helpers rely on realm/client being present on the request context.
+            session.getContext().setRealm(realm);
+            session.getContext().setClient(client);
+
             RootAuthenticationSessionModel rootAuthSession = new AuthenticationSessionManager(session).createAuthenticationSession(realm, false);
             AuthenticationSessionModel authSession = rootAuthSession.createAuthenticationSession(client);
             authSession.setProtocol(OIDCLoginProtocol.LOGIN_PROTOCOL);
+            authSession.setRedirectUri(issuer);
+            authSession.setClientNote(OIDCLoginProtocol.ISSUER, issuer);
             authSession.setClientNote(OIDCLoginProtocol.SCOPE_PARAM, scopeParam);
             authSession.setAuthenticatedUser(user);
 
@@ -114,7 +113,7 @@ public class IssueTokenForUserResource {
             TokenManager tokenManager = new TokenManager();
             org.keycloak.events.EventBuilder event = new org.keycloak.events.EventBuilder(realm, session, session.getContext().getConnection());
             var responseBuilder = tokenManager.responseBuilder(realm, client, event, session, userSession, clientSessionCtx).generateAccessToken();
-            if (org.keycloak.protocol.oidc.OIDCAdvancedConfigWrapper.fromClientModel(client).isUseRefreshToken()) {
+            if (OIDCAdvancedConfigWrapper.fromClientModel(client).isUseRefreshToken()) {
                 responseBuilder.generateRefreshToken();
             }
             responseBuilder.generateIDToken().generateAccessTokenHash();

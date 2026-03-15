@@ -16,7 +16,7 @@ Keycloak server extension that adds:
 | 4. Keycloak client | Keycloak Admin → Client | The client that will use `grant_type=steam_ticket` must have **Direct access grants** enabled. |
 | 5. Steam Web API key | **juvty-payments** (not Keycloak) | Get a Steam Web API key (Steamworks). Set **`STEAM_WEB_API_KEY_ARN`** to the ARN of an AWS secret whose JSON has key **`Steam__ApplicationKey`** (e.g. `juvty/steam-proxy`), or set **`STEAM_WEB_API_KEY`** in env for local dev. Payments uses it to call Steam (AuthenticateUserTicket, GetOwnedGames). |
 | 6. Payments URL | Keycloak / clients | juvty-payments must be reachable at the URL you put in `STEAM_TICKET_LOOKUP_URL`. With the current design, the lookup endpoint is unguarded so both Keycloak (server) and the Unity client (during Steam login, no token yet) can call it. |
-| 7. (Optional) issue-token-for-user | juvty-payments | If you use the “everything through payments” flow (client calls payments `POST /access/steam/authenticate`), payments needs to call Keycloak to get tokens. Configure payments to use `https://<keycloak>/realms/<realm>/ext/issue-token-for-user` (this extension adds that endpoint). |
+| 7. (Optional) issue-token-for-user | juvty-payments | If you use the “everything through payments” flow (client calls payments `POST /access/steam/authenticate`), payments needs to call Keycloak to get tokens. Configure payments to use `https://<keycloak>/realms/<realm>/steam-token/issue-token-for-user` (this extension adds that endpoint). |
 
 **Steam dev key:** The **Steam Web API key** (step 5) is the one you need. It is used by **juvty-payments** only. Keycloak does not talk to Steam; it only calls your payments lookup URL. Get the key from [Steamworks](https://partner.steamgames.com/) (Web API Key for your app / account).
 
@@ -71,8 +71,8 @@ export STEAM_TICKET_LOOKUP_URL="https://juvty.com/api/juvty-payments/access/stea
 
 ### issue-token-for-user endpoint
 
-- **URL:** `https://<keycloak-host>/realms/<realm>/ext/issue-token-for-user`  
-  (This extension mounts the realm resource with id `ext`, so the path is `/realms/{realm}/ext/issue-token-for-user`.)
+- **URL:** `https://<keycloak-host>/realms/<realm>/steam-token/issue-token-for-user`  
+  (This extension mounts the realm resource with id `steam-token`, so the path is `/realms/{realm}/steam-token/issue-token-for-user`.)
 
 - **Auth:** Caller must call with a Bearer token obtained via OAuth2 client_credentials (e.g. the backend’s `client_id` + `client_secret`). Keycloak will set the client in the request context.
 
@@ -80,7 +80,7 @@ export STEAM_TICKET_LOOKUP_URL="https://juvty.com/api/juvty-payments/access/stea
 
 - **Response:** Standard token response (`access_token`, `refresh_token`, `expires_in`, etc.).
 
-If your backend expects a different path (e.g. `.../protocol/openid-connect/ext/issue-token-for-user`), configure the backend’s issue-token URL to `.../realms/<realm>/ext/issue-token-for-user`, or use a reverse proxy to rewrite the path.
+If your backend expects a different path (e.g. `.../realms/<realm>/steam-token/issue-token-for-user`), configure the backend’s issue-token URL to `.../realms/<realm>/steam-token/issue-token-for-user`, or use a reverse proxy to rewrite the path.
 
 ## Steam ticket grant usage
 
@@ -92,6 +92,35 @@ Clients (confidential) that have **Direct access grants** enabled can call the t
 - `game_key` – Optional game key string
 
 Plus `client_id` and `client_secret` (or equivalent client auth). The extension will call the configured lookup URL; if it returns a user id, it creates a session and returns access and refresh tokens.
+
+## Troubleshooting: 404 on `/realms/{realm}/steam-token/issue-token-for-user`
+
+This extension registers **three** SPIs in one JAR:
+
+- **ProtocolMapper** → `Steam ID (from broker link)` mapper (visible under Client scopes)
+- **RealmResourceProviderFactory** → `issue-token-for-user` REST endpoint at `/realms/{realm}/steam-token/issue-token-for-user`
+- **OAuth2GrantTypeFactory** → `grant_type=steam_ticket` at the token endpoint
+
+If you see the **mapper** in the admin UI but get **404** when calling the issue-token-for-user URL, the JAR is loaded but the realm resource may not be registered. Do the following:
+
+1. **Confirm the JAR contains the provider**  
+   Unzip the deployed JAR and check that `META-INF/services/org.keycloak.services.resource.RealmResourceProviderFactory` exists and contains `org.keycloak.steam.ticket.IssueTokenForUserResourceProvider`.
+
+2. **Check Keycloak startup logs**  
+   After restart, look for errors mentioning `IssueTokenForUserResourceProvider`, `RealmResourceProvider`, or provider id `ext`. Any exception during provider init can prevent the route from being registered.
+
+3. **Rebuild and redeploy**  
+   Run `mvn clean package`, replace the JAR in Keycloak `providers/`, and restart Keycloak. Ensure no old or duplicate JARs (e.g. different version or name) remain in `providers/`.
+
+4. **Call the endpoint directly**  
+   Use curl with a valid client_credentials token to see Keycloak’s response:
+   ```bash
+   TOKEN=$(curl -s -X POST "https://auth.juvty.com/realms/juvty/protocol/openid-connect/token" \
+     -d "grant_type=client_credentials" -d "client_id=payment-client" -d "client_secret=YOUR_SECRET" | jq -r .access_token)
+   curl -s -o /dev/null -w "%{http_code}" -X POST "https://auth.juvty.com/realms/juvty/steam-token/issue-token-for-user" \
+     -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{"userId":"some-uuid"}'
+   ```
+   If you get 404, the route is not registered on that Keycloak instance.
 
 ## Security
 
